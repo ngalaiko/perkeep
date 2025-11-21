@@ -40,6 +40,9 @@ import (
 	"go4.org/wkfs"
 	"golang.org/x/net/http2"
 	"perkeep.org/pkg/webserver/listen"
+	"tailscale.com/ipn"
+	"tailscale.com/ipn/ipnstate"
+	"tailscale.com/tailcfg"
 	"tailscale.com/tsnet"
 	"tailscale.com/util/ctxkey"
 )
@@ -312,10 +315,45 @@ func (s *Server) listenTailscale(addr string, withTLS bool) (net.Listener, error
 	s.tsnetServer = ts
 	if withTLS {
 		s.listenURL = "https://" + dnsName
+		if err := s.advertiseTailscaleService(ctx, st, name, 443); err != nil {
+			return nil, fmt.Errorf("error advertising service for Tailnet: %w", err)
+		}
 		return ts.Listen("tcp", ":443")
 	}
 	s.listenURL = "http://" + dnsName
+	if err := s.advertiseTailscaleService(ctx, st, name, 80); err != nil {
+		return nil, fmt.Errorf("error advertising service for Tailnet: %w", err)
+	}
 	return ts.Listen("tcp", ":80")
+}
+
+func (s *Server) advertiseTailscaleService(ctx context.Context, st *ipnstate.Status, name string, port uint16) error {
+	if len(st.TailscaleIPs) == 0 {
+		return nil
+	}
+	ip := st.TailscaleIPs[0]
+
+	lc, err := s.tsnetServer.LocalClient()
+	if err != nil {
+		return err
+	}
+	cfg, err := lc.GetServeConfig(ctx)
+	if err != nil {
+		return err
+	}
+	serviceName := tailcfg.ServiceName(fmt.Sprintf("svc:%s", name))
+	if cfg.Services == nil {
+		cfg.Services = make(map[tailcfg.ServiceName]*ipn.ServiceConfig)
+	}
+	cfg.Services[serviceName] = &ipn.ServiceConfig{
+		TCP: map[uint16]*ipn.TCPPortHandler{
+			port: {
+				TCPForward: fmt.Sprintf("%s:%d", ip, port),
+			},
+		},
+	}
+	s.printf("services: %v", cfg.Services)
+	return lc.SetServeConfig(ctx, cfg)
 }
 
 func (s *Server) throttleListener() net.Listener {
