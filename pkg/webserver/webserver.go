@@ -25,6 +25,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/tls"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net"
@@ -328,11 +329,14 @@ func (s *Server) listenTailscale(addr string, withTLS bool) (net.Listener, error
 }
 
 func (s *Server) advertiseTailscaleService(ctx context.Context, st *ipnstate.Status, name string, port uint16) error {
-	if len(st.TailscaleIPs) == 0 {
+	if port == 443 {
+		// TODO: advertisement of HTTPS service not yet supported.
 		return nil
 	}
-	ip := st.TailscaleIPs[0]
+	return s.advertiseHTTPTailscaleService(ctx, st, name)
+}
 
+func (s *Server) advertiseHTTPTailscaleService(ctx context.Context, st *ipnstate.Status, name string) error {
 	lc, err := s.tsnetServer.LocalClient()
 	if err != nil {
 		return err
@@ -347,12 +351,27 @@ func (s *Server) advertiseTailscaleService(ctx context.Context, st *ipnstate.Sta
 	}
 	cfg.Services[serviceName] = &ipn.ServiceConfig{
 		TCP: map[uint16]*ipn.TCPPortHandler{
-			port: {
-				TCPForward: fmt.Sprintf("%s:%d", ip, port),
+			80: {
+				HTTP: true,
+			},
+			443: {
+				HTTPS: true,
+			},
+		},
+		Web: map[ipn.HostPort]*ipn.WebServerConfig{
+			ipn.HostPort(fmt.Sprintf("%s.%s.ts.net:443", name, st.CurrentTailnet.Name)): {
+				Handlers: map[string]*ipn.HTTPHandler{
+					"/": {
+						Proxy: "http://127.0.0.1:80",
+					},
+				},
 			},
 		},
 	}
-	s.printf("services: %v", cfg.Services)
+	s.printf("------------------------------")
+	b, _ := json.Marshal(cfg)
+	s.printf("services: %s", string(b))
+	s.printf("------------------------------")
 	return lc.SetServeConfig(ctx, cfg)
 }
 
