@@ -25,13 +25,13 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/tls"
-	"encoding/json"
 	"fmt"
 	"log"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -329,14 +329,18 @@ func (s *Server) listenTailscale(addr string, withTLS bool) (net.Listener, error
 }
 
 func (s *Server) advertiseTailscaleService(ctx context.Context, st *ipnstate.Status, name string, port uint16) error {
+	serviceName := tailcfg.ServiceName(fmt.Sprintf("svc:%s", name))
 	if port == 443 {
 		// TODO: advertisement of HTTPS service not yet supported.
 		return nil
 	}
-	return s.advertiseHTTPTailscaleService(ctx, st, name)
+	if err := s.advertiseHTTPTailscaleService(ctx, st, serviceName); err != nil {
+		return err
+	}
+	return s.addServiceToPrefs(ctx, serviceName)
 }
 
-func (s *Server) advertiseHTTPTailscaleService(ctx context.Context, st *ipnstate.Status, name string) error {
+func (s *Server) advertiseHTTPTailscaleService(ctx context.Context, st *ipnstate.Status, name tailcfg.ServiceName) error {
 	lc, err := s.tsnetServer.LocalClient()
 	if err != nil {
 		return err
@@ -359,7 +363,7 @@ func (s *Server) advertiseHTTPTailscaleService(ctx context.Context, st *ipnstate
 			},
 		},
 		Web: map[ipn.HostPort]*ipn.WebServerConfig{
-			ipn.HostPort(fmt.Sprintf("%s.%s.ts.net:443", name, st.CurrentTailnet.Name)): {
+			ipn.HostPort(fmt.Sprintf("%s.%s.ts.net:443", name.WithoutPrefix(), st.CurrentTailnet.Name)): {
 				Handlers: map[string]*ipn.HTTPHandler{
 					"/": {
 						Proxy: "http://127.0.0.1:80",
@@ -368,11 +372,30 @@ func (s *Server) advertiseHTTPTailscaleService(ctx context.Context, st *ipnstate
 			},
 		},
 	}
-	s.printf("------------------------------")
-	b, _ := json.Marshal(cfg)
-	s.printf("services: %s", string(b))
-	s.printf("------------------------------")
 	return lc.SetServeConfig(ctx, cfg)
+}
+
+func (s *Server) addServiceToPrefs(ctx context.Context, serviceName tailcfg.ServiceName) error {
+	lc, err := s.tsnetServer.LocalClient()
+	if err != nil {
+		return err
+	}
+	prefs, err := lc.GetPrefs(ctx)
+	if err != nil {
+		return fmt.Errorf("error getting prefs: %w", err)
+	}
+	advertisedServices := prefs.AdvertiseServices
+	if slices.Contains(advertisedServices, serviceName.String()) {
+		return nil // already advertised
+	}
+	advertisedServices = append(advertisedServices, serviceName.String())
+	_, err = lc.EditPrefs(ctx, &ipn.MaskedPrefs{
+		AdvertiseServicesSet: true,
+		Prefs: ipn.Prefs{
+			AdvertiseServices: advertisedServices,
+		},
+	})
+	return err
 }
 
 func (s *Server) throttleListener() net.Listener {
